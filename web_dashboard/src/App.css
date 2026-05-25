@@ -207,7 +207,7 @@ body {
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
 }
 
-.card-header {
+.card-header, .history-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -215,7 +215,7 @@ body {
   gap: 0.5rem;
 }
 
-.card-title {
+.card-title, .history-title {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -223,6 +223,34 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1px;
+}
+
+/* Export/Download Button */
+.download-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  color: var(--text-main);
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: var(--transition-smooth);
+}
+
+.download-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.download-btn:active {
+  transform: translateY(0);
 }
 
 .card-icon {

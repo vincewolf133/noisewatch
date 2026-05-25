@@ -29,12 +29,24 @@ bool signupOK = false;
 // Hardware Configuration: Mapping sensors to GPIO pins
 // D1 = GPIO5, D2 = GPIO4, D3 = GPIO0, D4 = GPIO2
 const int SENSOR_PINS[4] = {5, 4, 0, 2};
-int sensorCounts[4] = {0, 0, 0, 0};  // Stores triggers per interval
+volatile int sensorCounts[4] = {0, 0, 0, 0};  // Stores triggers per interval
 int lastState[4] = {LOW, LOW, LOW, LOW}; // Stores previous state for edge detection
+
+// Output Devices (One for each sensor)
+// D0 = GPIO16, D5 = GPIO14, D6 = GPIO12, D7 = GPIO13
+const int ALARM_PINS[4] = {16, 14, 12, 13};  
+#define ALERT_THRESHOLD 1000 // Same threshold used in the web dashboard
 
 unsigned long previousMillis = 0;
 // Data upload frequency (1 second)
 const long interval = 1000;
+
+// Interrupt Service Routines for the 4 sensors
+// IRAM_ATTR is required for ESP8266 interrupts to run from RAM for speed
+void IRAM_ATTR sensor1_ISR() { sensorCounts[0]++; }
+void IRAM_ATTR sensor2_ISR() { sensorCounts[1]++; }
+void IRAM_ATTR sensor3_ISR() { sensorCounts[2]++; }
+void IRAM_ATTR sensor4_ISR() { sensorCounts[3]++; }
 
 /**
  * @brief Standard Arduino setup function.
@@ -47,6 +59,18 @@ void setup() {
   for (int i = 0; i < 4; i++) {
     pinMode(SENSOR_PINS[i], INPUT);
   }
+
+  // Configure Output Pins for Alarms (LEDs/Buzzers)
+  for (int i = 0; i < 4; i++) {
+    pinMode(ALARM_PINS[i], OUTPUT);
+    digitalWrite(ALARM_PINS[i], LOW); // Ensure they start OFF
+  }
+
+  // Attach hardware interrupts to catch EVERY noise pulse accurately
+  attachInterrupt(digitalPinToInterrupt(SENSOR_PINS[0]), sensor1_ISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(SENSOR_PINS[1]), sensor2_ISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(SENSOR_PINS[2]), sensor3_ISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(SENSOR_PINS[3]), sensor4_ISR, RISING);
 
   // Connect to the specified WiFi network
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -83,31 +107,40 @@ void setup() {
 
 /**
  * @brief Standard Arduino loop function.
- * Runs repeatedly to poll sensors and periodically upload data to Firebase.
+ * Runs repeatedly to upload data to Firebase periodically.
+ * Sensor polling is now handled automatically by hardware interrupts!
  */
 void loop() {
   unsigned long currentMillis = millis();
 
   /* 
-   * STEP 1: SENSOR POLLING (High Frequency)
-   * We check the sensors every time the loop runs.
-   * We look for a "Rising Edge" (LOW to HIGH transition).
-   * This indicates the sound sensor has triggered due to noise.
-   */
-  for (int i = 0; i < 4; i++) {
-    int currentState = digitalRead(SENSOR_PINS[i]);
-    if (currentState == HIGH && lastState[i] == LOW) {
-      sensorCounts[i]++; // Noise confirmed, increment the counter
-    }
-    lastState[i] = currentState;
-  }
-
-  /* 
-   * STEP 2: PERIODIC DATA UPLOAD (Defined by 'interval')
+   * PERIODIC DATA UPLOAD (Defined by 'interval')
    * Every 1 second, we aggregate the counts and send them to the Cloud.
    */
   if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
+    // Copy the volatile counts safely and reset them immediately
+    int currentCounts[4];
+    bool isAlert[4] = {false, false, false, false};
+    noInterrupts();
+    for (int i = 0; i < 4; i++) {
+      currentCounts[i] = sensorCounts[i];
+      sensorCounts[i] = 0;
+      
+      // Check if threshold is breached for this specific sensor
+      if (currentCounts[i] >= ALERT_THRESHOLD) {
+        isAlert[i] = true;
+      }
+    }
+    interrupts();
+
+    // Trigger local alarms per-sensor (will stay on for 1 second if breached)
+    for (int i = 0; i < 4; i++) {
+      if (isAlert[i]) {
+        digitalWrite(ALARM_PINS[i], HIGH);
+      } else {
+        digitalWrite(ALARM_PINS[i], LOW);
+      }
+    }
 
     // Check if Firebase is connected and ready
     if (Firebase.ready() && signupOK) {
@@ -116,8 +149,8 @@ void loop() {
         // A. Real-time Update (Overwrites the latest value)
         // Path: /sensors/current/sensor1...sensor4
         String currentPath = "/sensors/current/sensor" + String(i + 1);
-        if (Firebase.RTDB.setInt(&fbdo, currentPath.c_str(), sensorCounts[i])) {
-          Serial.printf("Sensor %d updated: %d\n", i + 1, sensorCounts[i]);
+        if (Firebase.RTDB.setInt(&fbdo, currentPath.c_str(), currentCounts[i])) {
+          Serial.printf("Sensor %d updated: %d\n", i + 1, currentCounts[i]);
         } else {
           Serial.printf("Sensor %d update failed: %s\n", i + 1, fbdo.errorReason().c_str());
         }
@@ -126,7 +159,7 @@ void loop() {
         // Path: /sensors/history/sensor1...sensor4
         String historyPath = "/sensors/history/sensor" + String(i + 1);
         FirebaseJson historyJson;
-        historyJson.set("intensity", sensorCounts[i]);
+        historyJson.set("intensity", currentCounts[i]);
         // .sv / timestamp = special Firebase instruction to use server-side time
         historyJson.set("timestamp/.sv", "timestamp");
 
@@ -136,11 +169,14 @@ void loop() {
           Serial.printf("Sensor %d history push failed: %s\n", i + 1, fbdo.errorReason().c_str());
         }
 
-        // C. Reset Local Counter
-        // We clear the count so the next 1-second interval starts fresh
-        sensorCounts[i] = 0;
+        // Prevent watchdog timer resets by yielding to the ESP background tasks
+        yield();
       }
       Serial.println("--- Batch Sync Complete ---");
     }
+    
+    // Update previousMillis AFTER the blocking operations 
+    // This guarantees we wait a full interval before uploading again
+    previousMillis = millis();
   }
 }
